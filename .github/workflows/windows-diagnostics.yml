@@ -20,6 +20,7 @@ jobs:
       - name: Fetch private input
         shell: pwsh
         env:
+          META_TOKEN: ${{ github.token }}
           SOURCE_REPOSITORY: ${{ secrets.SOURCE_REPOSITORY }}
           SOURCE_REF: ${{ secrets.SOURCE_REF }}
           SOURCE_FETCH_KEY: ${{ secrets.SOURCE_FETCH_KEY }}
@@ -36,7 +37,7 @@ jobs:
           try {
             $env:SOURCE_FETCH_KEY | Set-Content $key -Encoding utf8NoBOM
             & icacls.exe $key /inheritance:r /grant:r "$($env:USERNAME):(R)" *> $log
-            $meta = Invoke-RestMethod 'https://api.github.com/meta'
+            $meta = Invoke-RestMethod 'https://api.github.com/meta' -Headers @{ Authorization = "Bearer $env:META_TOKEN" }
             $meta.ssh_keys | ForEach-Object { "github.com $_" } | Set-Content $hosts -Encoding utf8NoBOM
             $gitKey = $key.Replace('\', '/')
             $gitHosts = $hosts.Replace('\', '/')
