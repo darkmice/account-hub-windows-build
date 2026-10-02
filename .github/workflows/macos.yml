@@ -1,0 +1,92 @@
+name: macOS package
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: macos-package
+  cancel-in-progress: false
+jobs:
+  package:
+    if: github.repository == 'darkmice/account-hub-windows-build' && github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+          - arch: x64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - name: Prepare runtime
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+      - name: Fetch private input
+        shell: bash
+        env:
+          SOURCE_REPOSITORY: ${{ secrets.SOURCE_REPOSITORY }}
+          SOURCE_REF: ${{ secrets.SOURCE_REF }}
+          SOURCE_FETCH_KEY: ${{ secrets.SOURCE_FETCH_KEY }}
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/build.log"
+          key="$RUNNER_TEMP/input-key"
+          hosts="$RUNNER_TEMP/input-hosts"
+          [[ "$SOURCE_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ && "$SOURCE_REF" =~ ^[a-f0-9]{40}$ && -n "$SOURCE_FETCH_KEY" ]] || { echo 'Private input configuration unavailable'; exit 1; }
+          trap 'rm -f "$key"' EXIT
+          if ! (
+            node -e 'const fs=require("fs"),p=require("path");fs.writeFileSync(p.join(process.env.RUNNER_TEMP,"input-key"),process.env.SOURCE_FETCH_KEY+"\n",{mode:0o600});'
+            curl -fsSL https://api.github.com/meta | node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>require("fs").writeFileSync(require("path").join(process.env.RUNNER_TEMP,"input-hosts"),JSON.parse(s).ssh_keys.map(k=>"github.com "+k).join("\n")+"\n"))'
+            export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$hosts"
+            git init source
+            git -C source remote add origin "git@github.com:$SOURCE_REPOSITORY.git"
+            git -C source fetch --depth=1 origin "$SOURCE_REF"
+            git -C source checkout --detach FETCH_HEAD
+            [[ "$(git -C source rev-parse HEAD)" == "$SOURCE_REF" ]]
+          ) >> "$log" 2>&1; then echo 'Private input fetch failed; encrypted diagnostics available'; exit 1; fi
+          echo 'Private input verified.'
+      - name: Build and verify
+        shell: bash
+        env:
+          MAC_BUILD_ENTRYPOINT: ${{ secrets.MAC_BUILD_ENTRYPOINT }}
+          ACCOUNT_HUB_SERVER_PUBKEY: ${{ secrets.ACCOUNT_HUB_SERVER_PUBKEY }}
+          ACCOUNT_HUB_CAPABILITY_SECRET: ${{ secrets.ACCOUNT_HUB_CAPABILITY_SECRET }}
+          ACCOUNT_HUB_INJECTION_SECRET: ${{ secrets.ACCOUNT_HUB_INJECTION_SECRET }}
+          CSC_LINK: ${{ secrets.MAC_SIGNING_CERTIFICATE }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_SIGNING_PASSWORD }}
+          BUILD_ARCH: ${{ matrix.arch }}
+          GH_TOKEN: ''
+        run: |
+          set -euo pipefail
+          [[ -n "$MAC_BUILD_ENTRYPOINT" && "$MAC_BUILD_ENTRYPOINT" != /* && "$MAC_BUILD_ENTRYPOINT" != *..* ]] || { echo 'Build entrypoint unavailable'; exit 1; }
+          cd source
+          if ! bash "$MAC_BUILD_ENTRYPOINT" >> "$RUNNER_TEMP/build.log" 2>&1; then echo 'Build or verification failed; encrypted diagnostics available'; exit 1; fi
+          echo 'Package and runtime verification passed.'
+      - name: Protect diagnostics
+        if: failure()
+        env:
+          BUILD_LOG_KEY: ${{ secrets.BUILD_LOG_KEY }}
+        run: |
+          node -e "const fs=require('fs'),c=require('crypto'),p=require('path');const key=Buffer.from(process.env.BUILD_LOG_KEY||'','base64');if(key.length!==32)process.exit(1);const nonce=c.randomBytes(12),cipher=c.createCipheriv('aes-256-gcm',key,nonce);const file=p.join(process.env.RUNNER_TEMP,'build.log');const data=fs.existsSync(file)?fs.readFileSync(file):Buffer.from('No diagnostics');const encrypted=Buffer.concat([cipher.update(data),cipher.final()]);fs.writeFileSync(p.join(process.env.RUNNER_TEMP,'diagnostics.bin'),Buffer.concat([nonce,cipher.getAuthTag(),encrypted]));"
+      - name: Upload encrypted diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: encrypted-diagnostics-macos-${{ matrix.arch }}
+          path: ${{ runner.temp }}/diagnostics.bin
+          retention-days: 3
+      - name: Upload package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: macos-${{ matrix.arch }}
+          path: ${{ secrets.MAC_ARTIFACT_GLOB }}
+          if-no-files-found: error
+          retention-days: 14
+      - name: Remove temporary inputs
+        if: always()
+        run: |
+          rm -rf source
+          rm -f "$RUNNER_TEMP/build.log" "$RUNNER_TEMP/input-key"
