@@ -1,0 +1,23 @@
+name: Split build artifacts
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  split:
+    if: github.repository == 'darkmice/account-hub-windows-build'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ secrets.ARTIFACT_SOURCE_RUN }}
+          name: ${{ secrets.ARTIFACT_SOURCE_NAME }}
+          path: input
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: package-metadata-and-plugin
+          path: ${{ secrets.ARTIFACT_METADATA_GLOB }}
+          if-no-files-found: error
+          retention-days: 14
