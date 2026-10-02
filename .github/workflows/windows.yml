@@ -1,0 +1,107 @@
+name: Windows package
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: windows-package
+  cancel-in-progress: false
+jobs:
+  package:
+    if: github.repository == 'darkmice/account-hub-windows-build' && github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - name: Prepare runtime
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+      - name: Fetch private input
+        shell: pwsh
+        env:
+          SOURCE_REPOSITORY: ${{ secrets.SOURCE_REPOSITORY }}
+          SOURCE_REF: ${{ secrets.SOURCE_REF }}
+          SOURCE_FETCH_KEY: ${{ secrets.SOURCE_FETCH_KEY }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          if ($env:SOURCE_REPOSITORY -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' -or
+              $env:SOURCE_REF -notmatch '^[a-f0-9]{40}$' -or !$env:SOURCE_FETCH_KEY) {
+            throw 'Private input configuration unavailable'
+          }
+          $key = Join-Path $env:RUNNER_TEMP 'input-key'
+          $hosts = Join-Path $env:RUNNER_TEMP 'input-hosts'
+          $log = Join-Path $env:RUNNER_TEMP 'build.log'
+          try {
+            $env:SOURCE_FETCH_KEY | Set-Content $key -Encoding utf8NoBOM
+            & icacls.exe $key /inheritance:r /grant:r "$($env:USERNAME):(R)" *> $log
+            $meta = Invoke-RestMethod 'https://api.github.com/meta'
+            $meta.ssh_keys | ForEach-Object { "github.com $_" } | Set-Content $hosts -Encoding utf8NoBOM
+            $env:GIT_SSH_COMMAND = "C:/Windows/System32/OpenSSH/ssh.exe -i $key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$hosts"
+            git init source *>> $log
+            git -C source remote add origin "git@github.com:$($env:SOURCE_REPOSITORY).git" *>> $log
+            git -C source fetch --depth=1 origin $env:SOURCE_REF *>> $log
+            git -C source checkout --detach FETCH_HEAD *>> $log
+            $actual = git -C source rev-parse HEAD
+            if ($actual -ne $env:SOURCE_REF) { throw 'Private input revision mismatch' }
+          } catch {
+            $_ | Out-String | Add-Content $log
+            throw 'Private input fetch failed; encrypted diagnostics are available'
+          } finally {
+            Remove-Item $key -Force -ErrorAction SilentlyContinue
+            Remove-Item Env:GIT_SSH_COMMAND -ErrorAction SilentlyContinue
+          }
+          Write-Output 'Private input verified.'
+      - name: Build and verify
+        shell: pwsh
+        env:
+          BUILD_ENTRYPOINT: ${{ secrets.BUILD_ENTRYPOINT }}
+          ACCOUNT_HUB_SERVER_PUBKEY: ${{ secrets.ACCOUNT_HUB_SERVER_PUBKEY }}
+          ACCOUNT_HUB_CAPABILITY_SECRET: ${{ secrets.ACCOUNT_HUB_CAPABILITY_SECRET }}
+          ACCOUNT_HUB_INJECTION_SECRET: ${{ secrets.ACCOUNT_HUB_INJECTION_SECRET }}
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+          GH_TOKEN: ''
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $log = Join-Path $env:RUNNER_TEMP 'build.log'
+          try {
+            Set-Location source
+            if (!$env:BUILD_ENTRYPOINT -or $env:BUILD_ENTRYPOINT.Contains('..') -or [IO.Path]::IsPathRooted($env:BUILD_ENTRYPOINT)) {
+              throw 'Build entrypoint unavailable'
+            }
+            & (Join-Path $PWD $env:BUILD_ENTRYPOINT) *>> $log
+          } catch {
+            $_ | Out-String | Add-Content $log
+            throw 'Build or verification failed; encrypted diagnostics are available'
+          }
+          Write-Output 'Package and runtime verification passed.'
+      - name: Protect diagnostics
+        if: failure()
+        shell: pwsh
+        env:
+          BUILD_LOG_KEY: ${{ secrets.BUILD_LOG_KEY }}
+        run: |
+          node -e "const fs=require('fs'),c=require('crypto'),p=require('path');const key=Buffer.from(process.env.BUILD_LOG_KEY||'','base64');if(key.length!==32)process.exit(1);const nonce=c.randomBytes(12),cipher=c.createCipheriv('aes-256-gcm',key,nonce);const file=p.join(process.env.RUNNER_TEMP,'build.log');const data=fs.existsSync(file)?fs.readFileSync(file):Buffer.from('No diagnostics');const encrypted=Buffer.concat([cipher.update(data),cipher.final()]);fs.writeFileSync(p.join(process.env.RUNNER_TEMP,'diagnostics.bin'),Buffer.concat([nonce,cipher.getAuthTag(),encrypted]));"
+      - name: Upload encrypted diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: encrypted-diagnostics
+          path: ${{ runner.temp }}/diagnostics.bin
+          if-no-files-found: ignore
+          retention-days: 3
+      - name: Upload package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: windows-x64
+          path: ${{ secrets.ARTIFACT_GLOB }}
+          if-no-files-found: error
+          retention-days: 14
+      - name: Remove temporary inputs
+        if: always()
+        shell: pwsh
+        run: |
+          Remove-Item source -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item (Join-Path $env:RUNNER_TEMP 'build.log') -Force -ErrorAction SilentlyContinue
+          Remove-Item (Join-Path $env:RUNNER_TEMP 'input-key') -Force -ErrorAction SilentlyContinue
