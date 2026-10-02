@@ -30,6 +30,7 @@ jobs:
           SOURCE_REPOSITORY: ${{ secrets.SOURCE_REPOSITORY }}
           SOURCE_REF: ${{ secrets.SOURCE_REF }}
           SOURCE_FETCH_KEY: ${{ secrets.SOURCE_FETCH_KEY }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           log="$RUNNER_TEMP/build.log"
@@ -39,12 +40,12 @@ jobs:
           trap 'rm -f "$key"' EXIT
           if ! (
             node -e 'const fs=require("fs"),p=require("path");fs.writeFileSync(p.join(process.env.RUNNER_TEMP,"input-key"),process.env.SOURCE_FETCH_KEY+"\n",{mode:0o600});'
-            curl -fsSL https://api.github.com/meta | node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>require("fs").writeFileSync(require("path").join(process.env.RUNNER_TEMP,"input-hosts"),JSON.parse(s).ssh_keys.map(k=>"github.com "+k).join("\n")+"\n"))'
+            node -e 'fetch("https://api.github.com/meta",{headers:{authorization:"Bearer "+process.env.GH_TOKEN}}).then(async r=>{if(!r.ok)throw new Error("Host metadata unavailable");const m=await r.json();require("fs").writeFileSync(require("path").join(process.env.RUNNER_TEMP,"input-hosts"),m.ssh_keys.map(k=>"github.com "+k).join("\n")+"\n")}).catch(()=>process.exit(1))' || exit 1
             export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$hosts"
-            git init source
-            git -C source remote add origin "git@github.com:$SOURCE_REPOSITORY.git"
-            git -C source fetch --depth=1 origin "$SOURCE_REF"
-            git -C source checkout --detach FETCH_HEAD
+            git init source || exit 1
+            git -C source remote add origin "git@github.com:$SOURCE_REPOSITORY.git" || exit 1
+            git -C source fetch --depth=1 origin "$SOURCE_REF" || exit 1
+            git -C source checkout --detach FETCH_HEAD || exit 1
             [[ "$(git -C source rev-parse HEAD)" == "$SOURCE_REF" ]]
           ) >> "$log" 2>&1; then echo 'Private input fetch failed; encrypted diagnostics available'; exit 1; fi
           echo 'Private input verified.'
