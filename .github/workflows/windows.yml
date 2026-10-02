@@ -37,7 +37,9 @@ jobs:
             & icacls.exe $key /inheritance:r /grant:r "$($env:USERNAME):(R)" *> $log
             $meta = Invoke-RestMethod 'https://api.github.com/meta'
             $meta.ssh_keys | ForEach-Object { "github.com $_" } | Set-Content $hosts -Encoding utf8NoBOM
-            $env:GIT_SSH_COMMAND = "C:/Windows/System32/OpenSSH/ssh.exe -i $key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$hosts"
+            $gitKey = $key.Replace('\', '/')
+            $gitHosts = $hosts.Replace('\', '/')
+            $env:GIT_SSH_COMMAND = "C:/Windows/System32/OpenSSH/ssh.exe -i `"$gitKey`" -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=`"$gitHosts`""
             git init source *>> $log
             git -C source remote add origin "git@github.com:$($env:SOURCE_REPOSITORY).git" *>> $log
             git -C source fetch --depth=1 origin $env:SOURCE_REF *>> $log
